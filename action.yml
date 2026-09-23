@@ -1,5 +1,5 @@
 name: Paced AI Code Review
-description: Reviews a whole repository with Gemini a chunk at a time, waiting out rate limits and resuming across runs.
+description: Reviews a whole repository with Gemini once, then only changed files, pacing around rate limits and resuming across runs.
 author: Mackery
 
 branding:
@@ -34,6 +34,9 @@ inputs:
   requests-per-minute:
     description: Upper bound on request rate, kept under the model's per-minute quota.
     default: "5"
+  reset-after-days:
+    description: Days after a full review before the whole project is reviewed again from scratch, in a new issue. 0 never resets.
+    default: "30"
   time-budget-minutes:
     description: Stop and save progress after this long. Keep it below the job's timeout-minutes.
     default: "330"
@@ -57,5 +60,6 @@ runs:
         AIR_CHUNK_LINES: ${{ inputs.chunk-lines }}
         AIR_MIN_SEVERITY: ${{ inputs.min-severity }}
         AIR_REQUESTS_PER_MINUTE: ${{ inputs.requests-per-minute }}
+        AIR_RESET_AFTER_DAYS: ${{ inputs.reset-after-days }}
         AIR_TIME_BUDGET_MINUTES: ${{ inputs.time-budget-minutes }}
         AIR_DRY_RUN: ${{ inputs.dry-run }}

@@ -98,7 +98,12 @@ def ensure_commit(sha):
         git("fetch", "--depth=1", "origin", sha)
 
 
-def load_files(sha, include, exclude):
+def changed_paths(base, sha):
+    out = git("diff", "--name-only", "--no-renames", "--diff-filter=d", "-z", base, sha)
+    return {p for p in out.decode("utf-8").split("\0") if p}
+
+
+def load_files(sha, include, exclude, only=None):
     inc = [glob_to_regex(p) for p in include]
     exc = [glob_to_regex(p) for p in exclude]
     files = {}
@@ -108,6 +113,8 @@ def load_files(sha, include, exclude):
         meta, path = entry.split("\t", 1)
         mode, kind, _ = meta.split(" ")
         if kind != "blob" or mode == "120000":
+            continue
+        if only is not None and path not in only:
             continue
         if not any(r.match(path) for r in inc) or any(r.match(path) for r in exc):
             continue
@@ -302,42 +309,105 @@ class GitHub:
         return None
 
 
+def is_sha(value):
+    return isinstance(value, str) and SHA_RE.fullmatch(value) is not None
+
+
+def valid_review(review):
+    return (
+        isinstance(review, dict)
+        and is_sha(review.get("sha"))
+        and (review.get("base") is None or is_sha(review["base"]))
+        and isinstance(review.get("findings"), int)
+        and all(
+            isinstance(review.get(key), list) and all(isinstance(i, str) for i in review[key])
+            for key in ("done", "failed")
+        )
+    )
+
+
 def load_state(body):
     # The issue body is editable by anyone with write access, so check every field before it reaches git.
     try:
         state = json.loads(STATE_RE.search(body).group(1))
     except (AttributeError, ValueError):
         return None
-    if not (
-        isinstance(state, dict)
-        and isinstance(state.get("sha"), str)
-        and SHA_RE.fullmatch(state["sha"])
-        and isinstance(state.get("findings"), int)
-        and all(
-            isinstance(state.get(key), list) and all(isinstance(i, str) for i in state[key])
-            for key in ("done", "failed")
-        )
-    ):
+    if not isinstance(state, dict):
         return None
-    return state
+    if state.get("version") == 1:
+        review = {k: state.get(k) for k in ("sha", "done", "failed", "findings")}
+        review["base"] = None
+        return new_state(review) if valid_review(review) else None
+    baseline, review, full_at = state.get("baseline"), state.get("review"), state.get("full_at")
+    if (
+        (baseline is None or is_sha(baseline))
+        and (review is None or valid_review(review))
+        and (full_at is None or (isinstance(full_at, int) and not isinstance(full_at, bool)))
+    ):
+        return {"version": 2, "baseline": baseline, "full_at": full_at, "review": review}
+    return None
 
 
-def render_body(state, chunks, model, web):
-    done, failed = set(state["done"]), set(state["failed"])
-    processed = sum(1 for c in chunks if c["id"] in done or c["id"] in failed)
-    total = len(chunks)
-    sha = state["sha"]
-    header = [
+def new_state(review=None):
+    return {"version": 2, "baseline": None, "full_at": None, "review": review}
+
+
+def finish_review(state):
+    review = state["review"]
+    state["baseline"] = review["sha"]
+    if review["base"] is None:
+        state["full_at"] = int(time.time())
+    state["review"] = None
+
+
+def day(timestamp):
+    return time.strftime("%Y-%m-%d", time.gmtime(timestamp))
+
+
+def commit_link(sha, web):
+    return f"[`{sha[:7]}`]({web}/tree/{sha})" if web else sha[:7]
+
+
+def scope_text(review, web=None):
+    if review["base"] is None:
+        return f"the whole project at {commit_link(review['sha'], web)}"
+    return f"changes from {commit_link(review['base'], web)} to {commit_link(review['sha'], web)}"
+
+
+def render_body(state, chunks, model, web, reset_days):
+    review = state["review"]
+    baseline = state["baseline"]
+    status = [f"**Last completed review:** {commit_link(baseline, web) if baseline else 'none yet'}"]
+    if state["full_at"]:
+        full = f"**Last full review:** {day(state['full_at'])}"
+        if reset_days > 0:
+            full += f". The whole project is reviewed again after {day(state['full_at'] + reset_days * 86400)}."
+        status.append(full)
+    if review:
+        done, failed = set(review["done"]), set(review["failed"])
+        processed = sum(1 for c in chunks if c["id"] in done or c["id"] in failed)
+        status.append(
+            f"**Current review:** {scope_text(review, web)}. {processed} of {len(chunks)} chunks reviewed, "
+            f"{plural(review['findings'], 'finding')} so far."
+        )
+    else:
+        status.append("**Current review:** none. The next run reviews anything changed since the last completed review.")
+
+    lines = [
         f"<!-- ai-review-state {json.dumps(state, separators=(',', ':'))} -->",
-        f"AI code review of [`{sha[:7]}`]({web}/tree/{sha}) using `{model}`.",
+        f"Ongoing AI code review using `{model}`. The first review covers the whole project. "
+        "After that, each review covers only the files changed since the last one finished.",
         "",
-        f"**{'Complete' if processed == total else 'In progress'}:** {processed} of {total} chunks reviewed, "
-        f"{plural(state['findings'], 'finding')} so far. Findings are posted as comments below.",
+        "\n\n".join(status),
         "",
-        "The review picks up where it left off on each run until every chunk is done. "
-        "Close this issue to start a fresh review of the latest commit on the next run.",
+        "Findings are posted as comments below. If a run stops on quota or time, the next run picks up where it left off. "
+        "Close this issue to make the next run review the whole project again, in a new issue.",
     ]
-    checklist = ["", "<details><summary>Chunks</summary>", ""]
+    header = "\n".join(lines)
+    if not review or not chunks:
+        return header
+
+    checklist = ["", "<details><summary>Chunks in the current review</summary>", ""]
     for c in chunks:
         if c["id"] in failed:
             checklist.append(f"- [ ] `{c['label']}` ({plural(len(c['files']), 'file')}) — review failed, see comments")
@@ -345,9 +415,8 @@ def render_body(state, chunks, model, web):
             mark = "x" if c["id"] in done else " "
             checklist.append(f"- [{mark}] `{c['label']}` ({plural(len(c['files']), 'file')})")
     checklist += ["", "</details>"]
-
-    body = "\n".join(header + checklist)
-    return body if len(body) <= MAX_BODY else "\n".join(header)
+    body = header + "\n" + "\n".join(checklist)
+    return body if len(body) <= MAX_BODY else header
 
 
 def neutralize(text):
@@ -362,7 +431,7 @@ def neutralize(text):
 def render_findings(chunk, findings, gh, sha):
     order = {s: i for i, s in enumerate(SEVERITIES)}
     findings = sorted(findings, key=lambda f: (order[f["severity"]], f["file"], f["line"]))
-    lines = [f"### `{chunk['label']}` — {plural(len(findings), 'finding')}", ""]
+    lines = [f"### `{chunk['label']}` at `{sha[:7]}` — {plural(len(findings), 'finding')}", ""]
     for f in findings:
         path, line = f["file"], f["line"]
         where = f"`{path.replace('`', '')}:{line}`"
@@ -406,6 +475,7 @@ def main():
     interval = 60 / float(setting("REQUESTS_PER_MINUTE", "5"))
     deadline = time.time() + float(setting("TIME_BUDGET_MINUTES", "330")) * 60
     instructions = setting("INSTRUCTIONS")
+    reset_days = float(setting("RESET_AFTER_DAYS", "30"))
 
     if setting("DRY_RUN", "false").lower() == "true":
         sha = git("rev-parse", "HEAD").decode().strip()
@@ -418,37 +488,74 @@ def main():
     gh = GitHub(setting("GITHUB_TOKEN"), os.environ["GITHUB_REPOSITORY"])
 
     issue = gh.find_tracking_issue()
+    state = new_state()
+    previous_issue = None
     if issue:
         state = load_state(issue["body"])
         if state is None:
-            sys.exit(f"::error::The progress saved in issue #{issue['number']} is damaged. Close the issue to start a new review.")
-        print(f"Resuming review in issue #{issue['number']}", flush=True)
-    else:
-        state = {"version": 1, "sha": git("rev-parse", "HEAD").decode().strip(), "done": [], "failed": [], "findings": 0}
+            sys.exit(f"::error::The progress saved in issue #{issue['number']} is damaged. "
+                     "Close the issue to start a new review.")
+        print(f"Using tracking issue #{issue['number']}", flush=True)
 
-    sha = state["sha"]
+    if (
+        state["review"] is None
+        and reset_days > 0
+        and state["full_at"]
+        and time.time() - state["full_at"] >= reset_days * 86400
+    ):
+        print(f"Last full review was on {day(state['full_at'])}; starting a new full review.", flush=True)
+        previous_issue, issue, state = issue, None, new_state()
+
+    if state["review"] is None:
+        head = git("rev-parse", "HEAD").decode().strip()
+        if head == state["baseline"]:
+            summary(f"Nothing new to review: {head[:7]} was already reviewed.")
+            return
+        state["review"] = {"sha": head, "base": state["baseline"], "done": [], "failed": [], "findings": 0}
+
+    review = state["review"]
+    sha = review["sha"]
     ensure_commit(sha)
-    files = load_files(sha, include, exclude)
+    only = None
+    if review["base"]:
+        try:
+            ensure_commit(review["base"])
+            only = changed_paths(review["base"], sha)
+        except subprocess.CalledProcessError:
+            print(f"::warning::The last reviewed commit {review['base'][:7]} no longer exists, "
+                  "probably because history was rewritten. Reviewing the whole project instead.", flush=True)
+            review["base"] = None
+    files = load_files(sha, include, exclude, only)
     chunks = plan_chunks(files, limit)
+    scope = scope_text(review)
+
     if not chunks:
-        summary("No files matched the include/exclude patterns; nothing to review.")
+        if issue:
+            finish_review(state)
+            gh.request("PATCH", f"/issues/{issue['number']}", {"body": render_body(state, [], model, gh.web, reset_days)})
+        summary(f"No files matching the include/exclude patterns in {scope}; nothing to review.")
         return
 
     if not issue:
         gh.ensure_label()
         issue = gh.request("POST", "/issues", {
-            "title": f"AI code review of {sha[:7]}",
-            "body": render_body(state, chunks, model, gh.web),
+            "title": "AI code review",
+            "body": render_body(state, chunks, model, gh.web, reset_days),
             "labels": [LABEL],
         })
-        print(f"Started review in issue #{issue['number']}", flush=True)
+        print(f"Started tracking issue #{issue['number']}", flush=True)
+        if previous_issue:
+            old = previous_issue["number"]
+            gh.request("POST", f"/issues/{old}/comments", {
+                "body": f"Starting a new full review in #{issue['number']}, since the last one is over "
+                        f"{reset_days:g} days old.",
+            })
+            gh.request("PATCH", f"/issues/{old}", {"state": "closed", "state_reason": "completed"})
 
     number = issue["number"]
-    handled = set(state["done"]) | set(state["failed"])
+    handled = set(review["done"]) | set(review["failed"])
     pending = [c for c in chunks if c["id"] not in handled]
-    if not pending:
-        summary(f"Review in #{number} is complete. Close the issue to start a new one.")
-        return
+    print(f"Reviewing {scope}: {len(pending)} of {len(chunks)} chunks left", flush=True)
 
     allowed = SEVERITIES[: SEVERITIES.index(min_severity) + 1]
     reviewed, stop_reason, last_request = 0, None, 0.0
@@ -475,24 +582,28 @@ def main():
             gh.request("POST", f"/issues/{number}/comments", {
                 "body": f"### `{chunk['label']}` — review failed\n\n{neutralize(e)}",
             })
-            state["failed"].append(chunk["id"])
+            review["failed"].append(chunk["id"])
         else:
             findings = [f for f in findings if f["severity"] in allowed]
             print(f"  {len(findings)} findings", flush=True)
             if findings:
                 gh.request("POST", f"/issues/{number}/comments", {"body": render_findings(chunk, findings, gh, sha)})
-            state["done"].append(chunk["id"])
-            state["findings"] += len(findings)
+            review["done"].append(chunk["id"])
+            review["findings"] += len(findings)
 
         reviewed += 1
-        gh.request("PATCH", f"/issues/{number}", {"body": render_body(state, chunks, model, gh.web)})
+        gh.request("PATCH", f"/issues/{number}", {"body": render_body(state, chunks, model, gh.web, reset_days)})
 
     remaining = len(pending) - reviewed
     if remaining:
         summary(f"Reviewed {reviewed} chunks this run; stopped because {stop_reason}. "
                 f"{remaining} chunks remain in #{number} and will resume on the next run.")
-    else:
-        summary(f"Review in #{number} is complete ({plural(state['findings'], 'finding')}).")
+        return
+
+    total_findings = review["findings"]
+    finish_review(state)
+    gh.request("PATCH", f"/issues/{number}", {"body": render_body(state, [], model, gh.web, reset_days)})
+    summary(f"Finished reviewing {scope} in #{number} ({plural(total_findings, 'finding')}).")
 
 
 if __name__ == "__main__":
