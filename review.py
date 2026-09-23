@@ -13,6 +13,7 @@ import urllib.request
 LABEL = "ai-review"
 SEVERITIES = ["high", "medium", "low"]
 STATE_RE = re.compile(r"<!-- ai-review-state (\{.*?\}) -->", re.S)
+SHA_RE = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 MAX_BODY = 65000
 MAX_TRANSIENT_ATTEMPTS = 5
@@ -244,10 +245,18 @@ def parse_findings(response):
             f"unreadable response (finish reason {candidate.get('finishReason')}"
             + (f", prompt feedback {feedback}" if feedback else "") + ")"
         ) from None
+    if not isinstance(findings, list):
+        raise ReviewFailed("response did not contain a list of findings")
+    findings = [f for f in findings if isinstance(f, dict)]
     for f in findings:
-        f["severity"] = f.get("severity", "low").lower()
+        f["severity"] = str(f.get("severity", "low")).lower()
         if f["severity"] not in SEVERITIES:
             f["severity"] = "low"
+        f["file"] = str(f.get("file", ""))
+        try:
+            f["line"] = max(int(f.get("line", 0)), 0)
+        except (TypeError, ValueError):
+            f["line"] = 0
     return findings
 
 
@@ -293,6 +302,26 @@ class GitHub:
         return None
 
 
+def load_state(body):
+    # The issue body is editable by anyone with write access, so check every field before it reaches git.
+    try:
+        state = json.loads(STATE_RE.search(body).group(1))
+    except (AttributeError, ValueError):
+        return None
+    if not (
+        isinstance(state, dict)
+        and isinstance(state.get("sha"), str)
+        and SHA_RE.fullmatch(state["sha"])
+        and isinstance(state.get("findings"), int)
+        and all(
+            isinstance(state.get(key), list) and all(isinstance(i, str) for i in state[key])
+            for key in ("done", "failed")
+        )
+    ):
+        return None
+    return state
+
+
 def render_body(state, chunks, model, web):
     done, failed = set(state["done"]), set(state["failed"])
     processed = sum(1 for c in chunks if c["id"] in done or c["id"] in failed)
@@ -321,18 +350,27 @@ def render_body(state, chunks, model, web):
     return body if len(body) <= MAX_BODY else "\n".join(header)
 
 
+def neutralize(text):
+    # Model output is untrusted; stop it from @-mentioning users or cross-linking issues outside code spans.
+    parts = re.split(r"(`[^`\n]*`)", str(text))
+    for i in range(0, len(parts), 2):
+        parts[i] = re.sub(r"@(?=\w)", "@​", parts[i])
+        parts[i] = re.sub(r"#(?=\d)", "#​", parts[i])
+    return "".join(parts)
+
+
 def render_findings(chunk, findings, gh, sha):
     order = {s: i for i, s in enumerate(SEVERITIES)}
-    findings = sorted(findings, key=lambda f: (order[f["severity"]], f.get("file", ""), f.get("line", 0)))
+    findings = sorted(findings, key=lambda f: (order[f["severity"]], f["file"], f["line"]))
     lines = [f"### `{chunk['label']}` — {plural(len(findings), 'finding')}", ""]
     for f in findings:
-        path, line = f.get("file", ""), f.get("line", 0)
-        where = f"`{path}:{line}`"
+        path, line = f["file"], f["line"]
+        where = f"`{path.replace('`', '')}:{line}`"
         if path in chunk["files"]:
             where = f"[{where}]({gh.web}/blob/{sha}/{path}#L{line})"
-        lines.append(f"**{f['severity'].capitalize()}** · {where} — {f.get('title', '').strip()}")
+        lines.append(f"**{f['severity'].capitalize()}** · {where} — {neutralize(f.get('title', '')).strip()}")
         lines.append("")
-        lines.append(f.get("explanation", "").strip())
+        lines.append(neutralize(f.get("explanation", "")).strip())
         lines.append("")
     body = "\n".join(lines)
     return body if len(body) <= MAX_BODY else body[:MAX_BODY] + "\n\n_(truncated)_"
@@ -381,7 +419,9 @@ def main():
 
     issue = gh.find_tracking_issue()
     if issue:
-        state = json.loads(STATE_RE.search(issue["body"]).group(1))
+        state = load_state(issue["body"])
+        if state is None:
+            sys.exit(f"::error::The progress saved in issue #{issue['number']} is damaged. Close the issue to start a new review.")
         print(f"Resuming review in issue #{issue['number']}", flush=True)
     else:
         state = {"version": 1, "sha": git("rev-parse", "HEAD").decode().strip(), "done": [], "failed": [], "findings": 0}
@@ -433,7 +473,7 @@ def main():
         except ReviewFailed as e:
             print(f"  failed: {e}", flush=True)
             gh.request("POST", f"/issues/{number}/comments", {
-                "body": f"### `{chunk['label']}` — review failed\n\n{e}",
+                "body": f"### `{chunk['label']}` — review failed\n\n{neutralize(e)}",
             })
             state["failed"].append(chunk["id"])
         else:

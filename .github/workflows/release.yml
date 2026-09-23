@@ -1,0 +1,31 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  move-major-tag:
+    name: Move major version tag
+    if: ${{ !github.event.release.prerelease }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout release
+        uses: actions/checkout@v7
+
+      - name: Point the major tag at this release
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Release tag '$TAG' is not in the form vMAJOR.MINOR.PATCH"
+            exit 1
+          fi
+          major="${TAG%%.*}"
+          git tag -f "$major"
+          git push -f origin "refs/tags/$major"
+          echo "Moved $major to $TAG" >> "$GITHUB_STEP_SUMMARY"

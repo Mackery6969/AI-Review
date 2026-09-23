@@ -1,0 +1,25 @@
+version: 2
+
+updates:
+  # review.py uses only the Python standard library, so workflow actions are the only dependencies.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:30"
+      timezone: "America/Chicago"
+
+    labels:
+      - "dependencies"
+      - "github-actions"
+      - "automation"
+
+    commit-message:
+      prefix: "ci"
+
+    groups:
+      github-actions:
+        patterns:
+          - "*"
