@@ -61,6 +61,10 @@ class OutOfTime(Exception):
     pass
 
 
+class GeminiUnavailable(Exception):
+    pass
+
+
 class ReviewFailed(Exception):
     pass
 
@@ -226,7 +230,7 @@ def call_gemini(model, api_key, prompt, deadline):
             elif e.code in (500, 502, 503, 504):
                 transient += 1
                 if transient > MAX_TRANSIENT_ATTEMPTS:
-                    raise ReviewFailed(f"Gemini returned {e.code} {MAX_TRANSIENT_ATTEMPTS} times: {detail[:300]}") from None
+                    raise GeminiUnavailable(f"Gemini returned {e.code} {MAX_TRANSIENT_ATTEMPTS} times in a row") from None
                 wait = min(30 * 2 ** (transient - 1), 600)
                 reason = f"server error {e.code}"
             elif e.code in (401, 403, 404):
@@ -236,7 +240,7 @@ def call_gemini(model, api_key, prompt, deadline):
         except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
             transient += 1
             if transient > MAX_TRANSIENT_ATTEMPTS:
-                raise ReviewFailed(f"network error {MAX_TRANSIENT_ATTEMPTS} times: {e}") from None
+                raise GeminiUnavailable(f"Gemini couldn't be reached {MAX_TRANSIENT_ATTEMPTS} times in a row") from None
             wait = min(30 * 2 ** (transient - 1), 600)
             reason = f"network error ({e})"
 
@@ -597,6 +601,10 @@ def main():
             break
         except OutOfTime:
             stop_reason = "the time budget ran out"
+            break
+        except GeminiUnavailable as e:
+            # An outage says nothing about the code, so the chunk is retried on the next run rather than failed.
+            stop_reason = str(e)
             break
         except ReviewFailed as e:
             print(f"::warning::Review of {chunk['label']} failed: {' '.join(str(e).split())}", flush=True)

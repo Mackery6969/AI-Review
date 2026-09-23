@@ -130,7 +130,7 @@ If the cache is ever lost, for example after a long period with no runs, the nex
 | --- | --- |
 | Too many requests per minute | Waits as long as Gemini asks (or backs off if it doesn't say), then retries the same chunk. Keeps retrying until the time budget runs out. |
 | Daily quota used up | Stops the run. The chunk is retried on the next run. |
-| Gemini server or network error | Backs off and retries, up to 5 times, then marks the chunk as failed. |
+| Gemini overloaded, server error, or network error | Backs off and retries, up to 5 times over about 15 minutes. If Gemini still isn't answering, it stops the run and the chunk is retried on the next run. An outage never counts against your code. |
 | Response is blocked, cut off, or unreadable | Marks the chunk as failed with a warning in the run log. |
 | Invalid API key or unknown model | Fails the job immediately with an error, since retrying won't help. Progress made so far is kept. |
 | Upload to code scanning fails | Fails the job with an error. The next run retries the upload before doing anything else. |
