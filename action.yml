@@ -15,7 +15,7 @@ inputs:
     default: ${{ github.token }}
   model:
     description: Gemini model to review with.
-    default: gemini-2.5-flash
+    default: gemini-3.8-flash
   include:
     description: Glob patterns of files to review, separated by commas or newlines.
     default: "**/*.java"

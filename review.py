@@ -468,7 +468,7 @@ def main():
     include = split_list(setting("INCLUDE", "**/*.java"))
     exclude = split_list(setting("EXCLUDE"))
     limit = int(setting("CHUNK_LINES", "3000"))
-    model = setting("MODEL", "gemini-2.5-flash")
+    model = setting("MODEL", "gemini-3.8-flash")
     min_severity = setting("MIN_SEVERITY", "medium").lower()
     if min_severity not in SEVERITIES:
         sys.exit(f"::error::min-severity must be one of {', '.join(SEVERITIES)}")

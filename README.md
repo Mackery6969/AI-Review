@@ -138,7 +138,7 @@ Failed chunks aren't retried within the same review. A failed file is reviewed a
 | --- | --- | --- |
 | `gemini-api-key` | *(required)* | Your Gemini API key. Pass it from a secret. |
 | `github-token` | `${{ github.token }}` | Token used to create and update the tracking issue. It needs `issues: write`. |
-| `model` | `gemini-2.5-flash` | Which Gemini model reviews the code. |
+| `model` | `gemini-3.8-flash` | Which Gemini model reviews the code. See [Google's model list](https://ai.google.dev/gemini-api/docs/models) for current names. |
 | `include` | `**/*.java` | Files to review, as glob patterns separated by commas or newlines. |
 | `exclude` | *(none)* | Files to skip, in the same format. Checked after `include`. |
 | `instructions` | *(none)* | Context about your project, added to every request. See below. |
@@ -220,7 +220,7 @@ Skipped pushes aren't lost. The next review covers everything since the last rev
       - uses: Mackery6969/AI-Review@v1
         with:
           gemini-api-key: ${{ secrets.GEMINI_API_KEY }}
-          model: gemini-2.5-pro
+          model: gemini-3.1-pro-preview
           min-severity: high
           requests-per-minute: "2"
 ```
@@ -241,7 +241,8 @@ Only closing the tracking issue will then start a new full review.
 Gemini's free tier limits both requests per minute and requests per day, and the limits differ by model and change over time. Check [Google's rate limit page](https://ai.google.dev/gemini-api/docs/rate-limits) for the current numbers.
 
 - **The full review is the expensive part.** It makes one request per chunk. Run a dry run to see the exact count. For example, about 70,000 lines at the default `chunk-lines` comes to around 26 requests. Reviews of changes are usually just one or two requests.
-- **Flash or Pro.** `gemini-2.5-flash` has more generous free limits and is the default. A Pro model usually gives more careful reviews but allows far fewer requests per day, so a large first review takes more days to finish.
+- **Flash or Pro.** `gemini-3.8-flash` is the default. A Pro model usually gives more careful reviews but allows far fewer requests per day, especially while it's a preview, so a large first review takes more days to finish. Your exact limits for each model are shown on the [AI Studio rate limit page](https://aistudio.google.com/rate-limit).
+- **Retired models.** Google stops offering older models to new API keys over time. If a run fails with a 404 saying a model is "no longer available", set `model` to a current one.
 - **Chunk size.** Larger chunks mean fewer requests and more context per review, but each request is bigger and counts more against your tokens-per-minute limit. The default of 3,000 lines is a middle ground.
 - **Pacing.** Setting `requests-per-minute` at or below your model's limit avoids most rate-limit waits. If you set it higher, the action still works, but it spends time waiting.
 - **Reset interval.** Each reset repeats the full review. Raise `reset-after-days`, or set it to `0`, to spend less quota.
