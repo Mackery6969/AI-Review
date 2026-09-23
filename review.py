@@ -197,6 +197,14 @@ def retry_delay(detail, headers):
     return None
 
 
+def gemini_message(detail):
+    try:
+        message = json.loads(detail)["error"]["message"]
+    except (ValueError, KeyError, TypeError):
+        message = detail
+    return " ".join(str(message).split())[:300]
+
+
 def call_gemini(model, api_key, prompt, deadline):
     body = json.dumps({
         "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
@@ -226,13 +234,15 @@ def call_gemini(model, api_key, prompt, deadline):
                     raise DailyQuotaExhausted() from None
                 rate_limited += 1
                 wait = retry_delay(detail, e.headers) or min(60 * 2 ** (rate_limited - 1), 900)
-                reason = "rate limited"
+                reason = f"rate limited ({gemini_message(detail)})"
             elif e.code in (500, 502, 503, 504):
                 transient += 1
                 if transient > MAX_TRANSIENT_ATTEMPTS:
-                    raise GeminiUnavailable(f"Gemini returned {e.code} {MAX_TRANSIENT_ATTEMPTS} times in a row") from None
+                    raise GeminiUnavailable(
+                        f"Gemini returned {e.code} {MAX_TRANSIENT_ATTEMPTS} times in a row ({gemini_message(detail)})"
+                    ) from None
                 wait = min(30 * 2 ** (transient - 1), 600)
-                reason = f"server error {e.code}"
+                reason = f"server error {e.code} ({gemini_message(detail)})"
             elif e.code in (401, 403, 404):
                 sys.exit(f"::error::Gemini rejected the request ({e.code}); check the API key and model name. {detail[:500]}")
             else:
