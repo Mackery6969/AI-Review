@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Compile script
+        run: python3 -m py_compile review.py
+
+      - name: Dry run against this repository
+        uses: ./
+        with:
+          gemini-api-key: unused
+          include: "**/*.py"
+          dry-run: "true"

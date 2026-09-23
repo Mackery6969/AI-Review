@@ -1,0 +1,61 @@
+name: Paced AI Code Review
+description: Reviews a whole repository with Gemini a chunk at a time, waiting out rate limits and resuming across runs.
+author: Mackery
+
+branding:
+  icon: eye
+  color: purple
+
+inputs:
+  gemini-api-key:
+    description: Gemini API key from Google AI Studio.
+    required: true
+  github-token:
+    description: Token used to create and update the tracking issue. Needs issues write permission.
+    default: ${{ github.token }}
+  model:
+    description: Gemini model to review with.
+    default: gemini-2.5-flash
+  include:
+    description: Glob patterns of files to review, separated by commas or newlines.
+    default: "**/*.java"
+  exclude:
+    description: Glob patterns of files to skip, separated by commas or newlines.
+    default: ""
+  instructions:
+    description: Extra context for the reviewer, such as what the project is and what to watch for.
+    default: ""
+  chunk-lines:
+    description: Roughly how many lines of code to send per request.
+    default: "3000"
+  min-severity:
+    description: Lowest severity to report (high, medium, or low).
+    default: medium
+  requests-per-minute:
+    description: Upper bound on request rate, kept under the model's per-minute quota.
+    default: "5"
+  time-budget-minutes:
+    description: Stop and save progress after this long. Keep it below the job's timeout-minutes.
+    default: "330"
+  dry-run:
+    description: Only print how the files would be split into chunks. Calls no APIs and needs no secrets.
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - name: Review
+      shell: bash
+      run: python3 "$GITHUB_ACTION_PATH/review.py"
+      env:
+        AIR_GEMINI_API_KEY: ${{ inputs.gemini-api-key }}
+        AIR_GITHUB_TOKEN: ${{ inputs.github-token }}
+        AIR_MODEL: ${{ inputs.model }}
+        AIR_INCLUDE: ${{ inputs.include }}
+        AIR_EXCLUDE: ${{ inputs.exclude }}
+        AIR_INSTRUCTIONS: ${{ inputs.instructions }}
+        AIR_CHUNK_LINES: ${{ inputs.chunk-lines }}
+        AIR_MIN_SEVERITY: ${{ inputs.min-severity }}
+        AIR_REQUESTS_PER_MINUTE: ${{ inputs.requests-per-minute }}
+        AIR_TIME_BUDGET_MINUTES: ${{ inputs.time-budget-minutes }}
+        AIR_DRY_RUN: ${{ inputs.dry-run }}
