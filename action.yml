@@ -1,5 +1,5 @@
 name: Paced AI Code Review
-description: Reviews a whole repository with Gemini once, then only changed files, pacing around rate limits and resuming across runs.
+description: Reviews a whole repository with Gemini once, then only changed files, reporting findings as code scanning alerts.
 author: Mackery
 
 branding:
@@ -11,7 +11,7 @@ inputs:
     description: Gemini API key from Google AI Studio.
     required: true
   github-token:
-    description: Token used to create and update the tracking issue. Needs issues write permission.
+    description: Token used to upload results to code scanning. Needs security-events write permission.
     default: ${{ github.token }}
   model:
     description: Gemini model to review with.
@@ -35,8 +35,11 @@ inputs:
     description: Upper bound on request rate, kept under the model's per-minute quota.
     default: "5"
   reset-after-days:
-    description: Days after a full review before the whole project is reviewed again from scratch, in a new issue. 0 never resets.
+    description: Days after a full review before the whole project is reviewed again from scratch. 0 never resets.
     default: "30"
+  full-review:
+    description: Set to "true" to forget earlier reviews and start a full review now, discarding one in progress.
+    default: "false"
   time-budget-minutes:
     description: Stop and save progress after this long. Keep it below the job's timeout-minutes.
     default: "330"
@@ -47,7 +50,16 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Restore review progress
+      if: inputs.dry-run != 'true'
+      uses: actions/cache/restore@v6
+      with:
+        path: ${{ runner.temp }}/ai-review-state
+        key: ai-review-state-${{ github.run_id }}-${{ github.run_attempt }}
+        restore-keys: ai-review-state-
+
     - name: Review
+      id: review
       shell: bash
       run: python3 "$GITHUB_ACTION_PATH/review.py"
       env:
@@ -61,5 +73,15 @@ runs:
         AIR_MIN_SEVERITY: ${{ inputs.min-severity }}
         AIR_REQUESTS_PER_MINUTE: ${{ inputs.requests-per-minute }}
         AIR_RESET_AFTER_DAYS: ${{ inputs.reset-after-days }}
+        AIR_FULL_REVIEW: ${{ inputs.full-review }}
         AIR_TIME_BUDGET_MINUTES: ${{ inputs.time-budget-minutes }}
         AIR_DRY_RUN: ${{ inputs.dry-run }}
+        AIR_STATE_DIR: ${{ runner.temp }}/ai-review-state
+
+    # Saved even when the review step fails, so progress made before the failure isn't lost.
+    - name: Save review progress
+      if: always() && steps.review.outputs.state-changed == 'true'
+      uses: actions/cache/save@v6
+      with:
+        path: ${{ runner.temp }}/ai-review-state
+        key: ai-review-state-${{ github.run_id }}-${{ github.run_attempt }}
